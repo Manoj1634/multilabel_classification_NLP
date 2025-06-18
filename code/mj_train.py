@@ -1,7 +1,4 @@
-
 import os
-
-
 
 # List of packages to install
 packages = [
@@ -9,13 +6,13 @@ packages = [
     "pandas",
     "scikit-learn",
     "tqdm",
-    "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",  # Adjust based on CUDA/CPU
+    "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",
     "transformers",
     "openpyxl",
-    "torch"
+    "torch",
+    "nltk"
 ]
 
-# Install each package using os.system
 for package in packages:
     os.system(f"pip3 install {package}")
 
@@ -28,9 +25,59 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 from transformers import get_linear_schedule_with_warmup
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import f1_score
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+# Download required NLTK data
+nltk.download('stopwords')
+nltk.download('wordnet')
+
+# Text Preprocessing Functions
+def expand_contractions(text, contractions_dict):
+    for contraction, expansion in contractions_dict.items():
+        text = re.sub(r'\b' + re.escape(contraction) + r'\b', expansion, text)
+    return text
+
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    text = ' '.join(text.split())
+    return text
+
+def remove_stopwords(text):
+    stop_words = set(stopwords.words('english'))
+    words = text.split()
+    return ' '.join([word for word in words if word not in stop_words])
+
+def lemmatize_text(text):
+    lemmatizer = WordNetLemmatizer()
+    words = text.split()
+    return ' '.join([lemmatizer.lemmatize(word) for word in words])
+
+def clean_row(text):
+    # First handle contractions
+    contractions_dict = {
+        "don't": "do not", "it's": "it is", "how's": "how is", "i'm": "i am", "you're": "you are",
+        "we're": "we are", "they're": "they are", "won't": "will not", "can't": "cannot",
+        "didn't": "did not", "hasn't": "has not", "haven't": "have not", "isn't": "is not",
+        "aren't": "are not", "wasn't": "was not", "weren't": "were not", "shouldn't": "should not",
+        "couldn't": "could not", "wouldn't": "would not", "let's": "let us", "she's": "she is",
+        "he's": "he is", "that's": "that is", "there's": "there is"
+    }
+    text = text.lower()
+    text = expand_contractions(text, contractions_dict)
+    
+    # Then apply the NLTK-based preprocessing
+    text = preprocess_text(text)
+    text = remove_stopwords(text)
+    text = lemmatize_text(text)
+    
+    # Final cleanup
+    return re.sub(r'\s+', ' ', text).strip()
 
 # Parameters
 nickname = 'mj'
@@ -43,55 +90,27 @@ max_length = 128
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Preprocessing functions
-def expand_contractions(text, contractions_dict):
-    for contraction, expansion in contractions_dict.items():
-        text = re.sub(r'\b' + re.escape(contraction) + r'\b', expansion, text)
-    return text
-
-def clean_row(text):
-    contractions_dict = {
-        "don't": "do not",
-        "it's": "it is",
-        "how's": "how is",
-        "i'm": "i am",
-        "you're": "you are",
-        "we're": "we are",
-        "they're": "they are",
-        "won't": "will not",
-        "can't": "cannot",
-        "didn't": "did not",
-        "hasn't": "has not",
-        "haven't": "have not",
-        "isn't": "is not",
-        "aren't": "are not",
-        "wasn't": "was not",
-        "weren't": "were not",
-        "shouldn't": "should not",
-        "couldn't": "could not",
-        "wouldn't": "would not",
-        "let's": "let us",
-        "she's": "she is",
-        "he's": "he is",
-        "that's": "that is",
-        "there's": "there is",
-    }
-    text = text.lower()
-    text = expand_contractions(text, contractions_dict)
-    cleaned_text = re.sub(r'\s+', ' ', text).strip()
-    return cleaned_text
-
 # Load dataset
-df = pd.read_excel(file_path)
+df = pd.read_excel(file_path, engine='openpyxl')
 df['text'] = df['text'].apply(clean_row)
 
 labels_list = ['Computer Science', 'Physics', 'Mathematics', 'Statistics', 'Quantitative Biology', 'Quantitative Finance']
 labels = df[labels_list].values
 
-# Initialize tokenizer
+# Compute pos_weight for imbalance handling
+label_counts = labels.sum(axis=0)
+total_samples = labels.shape[0]
+pos_weight = torch.tensor((total_samples - label_counts) / (label_counts + 1e-6), dtype=torch.float).to(device)
+
+# Optional: Print stats
+print("\nLabel Distribution and pos_weights:")
+for i, label in enumerate(labels_list):
+    print(f"{label:25s} | Positives: {int(label_counts[i])} | pos_weight: {pos_weight[i]:.2f}")
+
+# Tokenizer
 tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
-# Custom Dataset
+# Dataset
 class CustomDataset(Dataset):
     def __init__(self, texts, labels, tokenizer, max_len=128):
         self.texts = texts
@@ -123,10 +142,7 @@ class CustomDataset(Dataset):
 
 # Split data
 train_texts, val_texts, train_labels, val_labels = train_test_split(
-    df['text'].values,
-    labels,
-    test_size=0.2,
-    random_state=42
+    df['text'].values, labels, test_size=0.2, random_state=42
 )
 
 train_dataset = CustomDataset(train_texts, train_labels, tokenizer, max_length)
@@ -135,10 +151,10 @@ val_dataset = CustomDataset(val_texts, val_labels, tokenizer, max_length)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-# Define Model
+# Model
 class DistilBERTForSequenceClassification(nn.Module):
     def __init__(self, pretrained_model_name, num_labels, dropout_prob=0.2):
-        super(DistilBERTForSequenceClassification, self).__init__()
+        super().__init__()
         config = AutoConfig.from_pretrained(pretrained_model_name)
         config.hidden_dropout_prob = dropout_prob
         self.distilbert = AutoModel.from_pretrained(pretrained_model_name, config=config)
@@ -148,20 +164,16 @@ class DistilBERTForSequenceClassification(nn.Module):
     def forward(self, input_ids, attention_mask=None):
         outputs = self.distilbert(input_ids=input_ids, attention_mask=attention_mask)
         cls_output = outputs.last_hidden_state[:, 0, :]
-        cls_output = self.dropout(cls_output)
-        logits = self.classifier(cls_output)
-        return logits
+        return self.classifier(self.dropout(cls_output))
 
-# Initialize model and optimizer
 model = DistilBERTForSequenceClassification("distilbert-base-uncased", num_labels=num_labels).to(device)
 optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-criterion = nn.BCEWithLogitsLoss()
+criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-# Learning rate scheduler
 total_steps = len(train_loader) * num_epochs
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
 
-# Training Loop
+# Training loop
 def train_epoch(model, data_loader, criterion, optimizer, scheduler, device):
     model.train()
     losses = []
@@ -179,7 +191,7 @@ def train_epoch(model, data_loader, criterion, optimizer, scheduler, device):
         losses.append(loss.item())
     return np.mean(losses)
 
-# Evaluation Loop
+# Evaluation loop
 def eval_model(model, data_loader, criterion, device):
     model.eval()
     losses = []
@@ -198,14 +210,13 @@ def eval_model(model, data_loader, criterion, device):
 
     preds = np.vstack(preds)
     true_labels = np.vstack(true_labels)
-
     f1_macro = f1_score(true_labels, preds >= 0.5, average='macro')
     return np.mean(losses), f1_macro
 
-# Training and Evaluation
+# Training
 best_val_loss = float('inf')
 for epoch in range(num_epochs):
-    print(f"Epoch {epoch + 1}/{num_epochs}")
+    print(f"\nEpoch {epoch + 1}/{num_epochs}")
     train_loss = train_epoch(model, train_loader, criterion, optimizer, scheduler, device)
     val_loss, val_f1_macro = eval_model(model, val_loader, criterion, device)
     print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, F1 Macro: {val_f1_macro:.4f}")
