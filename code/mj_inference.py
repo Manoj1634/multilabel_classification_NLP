@@ -1,22 +1,4 @@
-
 import os
-
-# List of packages to install
-packages = [
-    "numpy",
-    "pandas",
-    "scikit-learn",
-    "tqdm",
-    "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118",  # Adjust based on CUDA/CPU
-    "transformers",
-    "openpyxl"
-]
-
-# Install each package using os.system
-for package in packages:
-    os.system(f"pip3 install {package}")
-
-
 import re
 import pandas as pd
 import numpy as np
@@ -26,54 +8,60 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 from sklearn.metrics import f1_score
 import argparse
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+# Download required NLTK data
+nltk.download('stopwords')
+nltk.download('wordnet')
 
 # Parameters
 nickname = 'mj'
 max_length = 128
 batch_size = 16
 num_labels = 6
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Preprocessing functions
+# Text Preprocessing Functions
 def expand_contractions(text, contractions_dict):
     for contraction, expansion in contractions_dict.items():
         text = re.sub(r'\b' + re.escape(contraction) + r'\b', expansion, text)
     return text
 
+def preprocess_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    text = ' '.join(text.split())
+    return text
+
+def remove_stopwords(text):
+    stop_words = set(stopwords.words('english'))
+    words = text.split()
+    return ' '.join([word for word in words if word not in stop_words])
+
+def lemmatize_text(text):
+    lemmatizer = WordNetLemmatizer()
+    words = text.split()
+    return ' '.join([lemmatizer.lemmatize(word) for word in words])
+
 def clean_row(text):
     contractions_dict = {
-        "don't": "do not",
-        "it's": "it is",
-        "how's": "how is",
-        "i'm": "i am",
-        "you're": "you are",
-        "we're": "we are",
-        "they're": "they are",
-        "won't": "will not",
-        "can't": "cannot",
-        "didn't": "did not",
-        "hasn't": "has not",
-        "haven't": "have not",
-        "isn't": "is not",
-        "aren't": "are not",
-        "wasn't": "was not",
-        "weren't": "were not",
-        "shouldn't": "should not",
-        "couldn't": "could not",
-        "wouldn't": "would not",
-        "let's": "let us",
-        "she's": "she is",
-        "he's": "he is",
-        "that's": "that is",
-        "there's": "there is",
+        "don't": "do not", "it's": "it is", "how's": "how is", "i'm": "i am", "you're": "you are",
+        "we're": "we are", "they're": "they are", "won't": "will not", "can't": "cannot",
+        "didn't": "did not", "hasn't": "has not", "haven't": "have not", "isn't": "is not",
+        "aren't": "are not", "wasn't": "was not", "weren't": "were not", "shouldn't": "should not",
+        "couldn't": "could not", "wouldn't": "would not", "let's": "let us", "she's": "she is",
+        "he's": "he is", "that's": "that is", "there's": "there is"
     }
     text = text.lower()
     text = expand_contractions(text, contractions_dict)
-    cleaned_text = re.sub(r'\s+', ' ', text).strip()
-    return cleaned_text
+    text = preprocess_text(text)
+    text = remove_stopwords(text)
+    text = lemmatize_text(text)
+    return re.sub(r'\s+', ' ', text).strip()
 
-# Custom Dataset
+# Dataset
 class CustomDataset(Dataset):
     def __init__(self, texts, labels, tokenizer, max_len=128):
         self.texts = texts
@@ -103,10 +91,10 @@ class CustomDataset(Dataset):
             'labels': torch.FloatTensor(label)
         }
 
-# Model Definition
+# Model
 class DistilBERTForSequenceClassification(nn.Module):
     def __init__(self, pretrained_model_name, num_labels, dropout_prob=0.2):
-        super(DistilBERTForSequenceClassification, self).__init__()
+        super().__init__()
         config = AutoConfig.from_pretrained(pretrained_model_name)
         config.hidden_dropout_prob = dropout_prob
         self.distilbert = AutoModel.from_pretrained(pretrained_model_name, config=config)
@@ -116,10 +104,9 @@ class DistilBERTForSequenceClassification(nn.Module):
     def forward(self, input_ids, attention_mask=None):
         outputs = self.distilbert(input_ids=input_ids, attention_mask=attention_mask)
         cls_output = outputs.last_hidden_state[:, 0, :]
-        cls_output = self.dropout(cls_output)
-        logits = self.classifier(cls_output)
-        return logits
+        return self.classifier(self.dropout(cls_output))
 
+# Evaluation
 def eval_model(model, test_loader, criterion):
     model.eval()
     all_preds = []
@@ -147,14 +134,16 @@ def eval_model(model, test_loader, criterion):
 def metrics(all_targets, all_preds):
     return f1_score(all_targets, all_preds, average='macro')
 
+# Main Inference
 def main(path, train_df, model_path, split):
     tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
-    df = pd.read_excel(path + train_df)
+    df = pd.read_excel(path + train_df, engine='openpyxl')
     df['text'] = df['text'].apply(clean_row)
 
+    labels_list = ['Computer Science', 'Physics', 'Mathematics', 'Statistics', 'Quantitative Biology', 'Quantitative Finance']
     test_df = df[df['split'] == split]
     texts = test_df['text'].tolist()
-    labels = test_df.iloc[:, 2:-1].values
+    labels = test_df[labels_list].values
 
     test_dataset = CustomDataset(texts, labels, tokenizer, max_length)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
@@ -168,13 +157,13 @@ def main(path, train_df, model_path, split):
     f1 = metrics(all_targets, all_preds)
     print(f"F1 Score: {f1:.4f}")
 
-"""Don't touch the code below"""
-if '__main__' == __name__:
-    parser = argparse.ArgumentParser(description='Path to data file')
-    parser.add_argument('--data_path', type=str, help='Path to data file')
-    parser.add_argument('--train_df', type=str, help='train_df')
-    parser.add_argument('--model_path', type=str, help='Path to model')
-    parser.add_argument('--split', type=str, help='Split sample')
+# Entry Point
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Run inference')
+    parser.add_argument('--data_path', type=str, required=True, help='Path to data file')
+    parser.add_argument('--train_df', type=str, required=True, help='Excel file name')
+    parser.add_argument('--model_path', type=str, required=True, help='Path to saved model')
+    parser.add_argument('--split', type=str, default='test', help='Split to evaluate (default: test)')
     args = parser.parse_args()
 
     main(args.data_path, args.train_df, args.model_path, args.split)
